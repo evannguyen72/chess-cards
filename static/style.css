@@ -20,6 +20,7 @@ section { margin-bottom: 28px; }
 
 .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 20px; }
 .flash { background: #3b1d1d; border: 1px solid #7f1d1d; padding: 10px 14px; border-radius: 8px; margin-bottom: 16px; }
+.flash.ok { background: #14331f; border-color: #166534; }
 .banner { background: #1d2a4a; border: 1px solid var(--accent); padding: 12px 16px; border-radius: 10px; margin-bottom: 20px; display: flex; gap: 12px; align-items: center; justify-content: space-between; }
 
 .btn { display: inline-block; background: #262b36; color: var(--text); border: 1px solid var(--border); border-radius: 8px; padding: 10px 16px; font: inherit; cursor: pointer; text-decoration: none; }
@@ -72,6 +73,7 @@ tr.me td { color: var(--accent); font-weight: 600; }
 .stat { font-size: 28px; font-weight: 800; }
 .queue { display: flex; align-items: center; gap: 14px; background: #1d2a4a; border: 1px solid var(--accent); border-radius: 10px; padding: 14px; }
 .queue > div:nth-child(2) { flex: 1; }
+.queue-buttons { display: flex; flex-direction: column; gap: 6px; }
 .spinner { width: 26px; height: 26px; border: 3px solid #ffffff33; border-top-color: var(--accent); border-radius: 50%; animation: spin 1s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
 
@@ -105,3 +107,4 @@ tr.me td { color: var(--accent); font-weight: 600; }
 .moves { max-height: 260px; overflow-y: auto; padding-left: 28px; font-family: ui-monospace, Consolas, monospace; white-space: pre; margin: 0 0 12px; }
 .game-over { background: #1d2a4a; border: 1px solid var(--accent); border-radius: 10px; padding: 14px; text-align: center; }
 .error { color: var(--neg); min-height: 1em; }
+.panel.narrow { max-width: 480px; }

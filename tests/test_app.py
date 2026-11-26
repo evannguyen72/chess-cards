@@ -56,3 +56,66 @@ def test_pack_queue_and_full_game():
     assert a.get("/api/me").get_json()["cards"] == []  # cards are used up
     assert a.get("/dashboard").status_code == 200
     assert a.get(f"/game/{game_id}").status_code == 200
+
+
+def test_new_players_start_at_700():
+    c = make_player("carol")
+    assert c.get("/api/me").get_json()["user"]["elo"] == 700
+
+
+def test_grandmaster_card_plays_2000_bot():
+    app.config["BOT_SYNC"] = True
+    c = make_player("dave")
+    card = c.post("/api/pack/open").get_json()["card"]
+    with app.app_context():
+        db.session.get(Card, card["id"]).tier = 7
+        db.session.commit()
+    assert c.post("/api/queue/join", json={"card_id": card["id"]}).get_json()["queued"]
+    game_id = c.post("/api/queue/bot").get_json()["game_id"]
+
+    state = c.get(f"/api/game/{game_id}").get_json()
+    me = state["my_color"]
+    bot = state["black" if me == "white" else "white"]
+    assert bot["is_bot"] and bot["elo"] == 2000
+    # The bot always replies (or opens, if it's white) before control returns to us.
+    assert state["turn"] == me
+    move = state["legal_moves"][0]
+    after = c.post(f"/api/game/{game_id}/move", json={"move": move}).get_json()
+    assert after["status"] != "active" or after["turn"] == me
+    assert len(after["san_moves"]) == len(state["san_moves"]) + 2
+
+    final = c.post(f"/api/game/{game_id}/resign").get_json()
+    assert final["status"] == "finished"
+    # Losing to a much stronger opponent costs (almost) nothing, but never gains.
+    assert final[me]["elo_change"] <= 0 and bot["elo"] == 2000
+    assert final["black" if me == "white" else "white"]["elo_change"] == 0
+
+
+def test_bots_cannot_log_in_and_names_are_reserved():
+    c = app.test_client()
+    r = c.post("/register", data={"username": "Bot_999", "password": "secret123"}, follow_redirects=True)
+    assert b"reserved for bots" in r.data
+    r = c.post("/login", data={"username": "Bot_2000", "password": "!"}, follow_redirects=True)
+    assert b"Invalid username or password" in r.data
+
+
+def test_change_username_must_be_unique():
+    e = make_player("erin")
+    make_player("frank")
+
+    r = e.post("/settings", data={"username": "FRANK"}, follow_redirects=True)
+    assert b"That username is taken" in r.data
+
+    r = e.post("/settings", data={"username": "erin_the_great"}, follow_redirects=True)
+    assert b"Your username is now erin_the_great" in r.data
+    assert e.get("/api/me").get_json()["user"]["username"] == "erin_the_great"
+
+    # Changing only the capitalization of your own name is allowed.
+    r = e.post("/settings", data={"username": "Erin_The_Great"}, follow_redirects=True)
+    assert b"Your username is now Erin_The_Great" in r.data
+
+    # Registering with a name that differs only by case is refused.
+    other = app.test_client()
+    r = other.post("/register", data={"username": "erin_the_GREAT", "password": "secret123"},
+                   follow_redirects=True)
+    assert b"That username is taken" in r.data

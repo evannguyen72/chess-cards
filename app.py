@@ -1,6 +1,6 @@
 """
-Chess Cards - play chess against other people, but your opponent's rating
-is decided by the card you pull from your daily pack.
+Chess Cards - play chess against other people (or rated bots), but your
+opponent's rating is decided by the card you pull from your daily pack.
 
 Run:
     pip install -r requirements.txt
@@ -10,6 +10,8 @@ Then open http://127.0.0.1:5000
 import os
 import random
 import secrets
+import threading
+import time
 from datetime import datetime, timedelta, timezone
 from functools import wraps
 
@@ -17,12 +19,18 @@ import chess
 from flask import (Flask, abort, flash, jsonify, redirect, render_template,
                    request, session, url_for)
 from flask_sqlalchemy import SQLAlchemy
-from sqlalchemy import or_
+from sqlalchemy import inspect, or_, text
+from sqlalchemy.exc import IntegrityError
 from werkzeug.security import check_password_hash, generate_password_hash
 
+import bot as engine
+
 BASE_DIR = os.path.abspath(os.path.dirname(__file__))
-STARTING_ELO = 1200
+STARTING_ELO = 700
 K_FACTOR = 32
+BOT_WAIT_SECONDS = 15   # how long to search for a human before a bot steps in
+BOT_PREFIX = "Bot_"     # reserved username prefix for bots
+GM_ELO = 2000
 
 
 def load_secret_key():
@@ -46,22 +54,41 @@ app.config["SQLALCHEMY_DATABASE_URI"] = os.environ.get(
     "DATABASE_URL", "sqlite:///" + os.path.join(BASE_DIR, "chess_cards.db")
 )
 app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
+app.config["BOT_SYNC"] = False  # tests set this so bot moves happen inside the request
 db = SQLAlchemy(app)
 
 # ---------------------------------------------------------------------------
 # The 7 cards. min/max are offsets added to YOUR elo when you play the card.
-# Higher tiers are rarer and summon stronger opponents.
+# The Grandmaster card is different: it always summons a 2000-rated opponent.
 # ---------------------------------------------------------------------------
 CARD_TIERS = [
     {"tier": 1, "name": "Mirror Match",         "rarity": "Common",      "min": -10, "max": 10,  "weight": 35, "color": "#9ca3af"},
     {"tier": 2, "name": "Rising Challenger",    "rarity": "Uncommon",    "min": 10,  "max": 40,  "weight": 25, "color": "#22c55e"},
-    {"tier": 3, "name": "Club Veteran",         "rarity": "Rare",        "min": 40,  "max": 70,  "weight": 16, "color": "#3b82f6"},
-    {"tier": 4, "name": "Expert",               "rarity": "Epic",        "min": 70,  "max": 100, "weight": 11, "color": "#a855f7"},
-    {"tier": 5, "name": "Candidate Master",     "rarity": "Legendary",   "min": 100, "max": 140, "weight": 7,  "color": "#f59e0b"},
-    {"tier": 6, "name": "International Master", "rarity": "Mythic",      "min": 140, "max": 170, "weight": 4,  "color": "#ef4444"},
-    {"tier": 7, "name": "Grandmaster",          "rarity": "Grandmaster", "min": 170, "max": 200, "weight": 2,  "color": "#facc15"},
+    {"tier": 3, "name": "Club Veteran",         "rarity": "Rare",        "min": 40,  "max": 80,  "weight": 16, "color": "#3b82f6"},
+    {"tier": 4, "name": "Expert",               "rarity": "Epic",        "min": 80,  "max": 120, "weight": 11, "color": "#a855f7"},
+    {"tier": 5, "name": "Candidate Master",     "rarity": "Legendary",   "min": 120, "max": 160, "weight": 7,  "color": "#f59e0b"},
+    {"tier": 6, "name": "International Master", "rarity": "Mythic",      "min": 160, "max": 200, "weight": 4,  "color": "#ef4444"},
+    {"tier": 7, "name": "Grandmaster",          "rarity": "Grandmaster", "fixed": GM_ELO,         "weight": 2,  "color": "#facc15"},
 ]
+for _t in CARD_TIERS:
+    _t["label"] = f"{_t['fixed']} Elo" if "fixed" in _t else f"{_t['min']:+d} to {_t['max']:+d}"
 TIERS = {t["tier"]: t for t in CARD_TIERS}
+
+
+def card_range(tier, elo):
+    """(lowest, highest) opponent Elo this card can match you with."""
+    t = TIERS[tier]
+    if "fixed" in t:
+        return t["fixed"], t["fixed"] + 200  # 2000-rated bot, or any human 2000-2200
+    return elo + t["min"], elo + t["max"]
+
+
+def range_label(tier, elo):
+    lo, hi = card_range(tier, elo)
+    return f"{lo}+" if "fixed" in TIERS[tier] else f"{lo}–{hi}"
+
+
+app.jinja_env.globals["range_label"] = range_label
 
 
 def utcnow():
@@ -86,8 +113,12 @@ class User(db.Model):
     wins = db.Column(db.Integer, nullable=False, default=0)
     losses = db.Column(db.Integer, nullable=False, default=0)
     draws = db.Column(db.Integer, nullable=False, default=0)
+    is_bot = db.Column(db.Boolean, nullable=False, default=False)
     last_pack_date = db.Column(db.Date, nullable=True)
     created_at = db.Column(db.DateTime, nullable=False, default=utcnow)
+
+    # Usernames are unique ignoring case ("Evan" and "evan" can't both exist).
+    __table_args__ = (db.Index("uq_users_username_lower", db.func.lower(username), unique=True),)
 
     cards = db.relationship("Card", backref="owner", lazy=True)
 
@@ -108,11 +139,10 @@ class Card(db.Model):
     def to_dict(self, elo=None):
         t = TIERS[self.tier]
         d = {"id": self.id, "tier": self.tier, "name": t["name"], "rarity": t["rarity"],
-             "min": t["min"], "max": t["max"], "color": t["color"], "status": self.status,
+             "label": t["label"], "color": t["color"], "status": self.status,
              "obtained_at": self.obtained_at.isoformat() + "Z"}
         if elo is not None:
-            d["elo_min"] = elo + t["min"]
-            d["elo_max"] = elo + t["max"]
+            d["opponent"] = range_label(self.tier, elo)
         return d
 
 
@@ -135,8 +165,8 @@ class Game(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     white_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False)
     black_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False)
-    white_card_tier = db.Column(db.Integer, nullable=False)
-    black_card_tier = db.Column(db.Integer, nullable=False)
+    white_card_tier = db.Column(db.Integer, nullable=False, default=0)  # 0 = bot (no card)
+    black_card_tier = db.Column(db.Integer, nullable=False, default=0)
     white_elo_before = db.Column(db.Integer, nullable=False)
     black_elo_before = db.Column(db.Integer, nullable=False)
     white_elo_change = db.Column(db.Integer, nullable=True)
@@ -169,6 +199,23 @@ class Game(db.Model):
             return "black"
         return None
 
+    def bot_color(self):
+        if self.white.is_bot:
+            return "white"
+        if self.black.is_bot:
+            return "black"
+        return None
+
+
+def migrate():
+    """Bring databases created by older versions up to date."""
+    with db.engine.begin() as conn:
+        cols = {c["name"] for c in inspect(conn).get_columns("users")}
+        if "is_bot" not in cols:
+            conn.execute(text("ALTER TABLE users ADD COLUMN is_bot BOOLEAN NOT NULL DEFAULT FALSE"))
+        conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS uq_users_username_lower "
+                          "ON users (lower(username))"))
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -189,10 +236,32 @@ def login_required(view):
     return wrapped
 
 
+def username_error(name, user_id=None):
+    """Return a message explaining why `name` can't be used, or None if it's fine."""
+    if not (3 <= len(name) <= 32) or not name.replace("_", "").isalnum() or not name.isascii():
+        return "Username must be 3-32 letters, numbers or underscores."
+    if name.lower().startswith(BOT_PREFIX.lower()):
+        return f'Usernames starting with "{BOT_PREFIX}" are reserved for bots.'
+    taken = User.query.filter(db.func.lower(User.username) == name.lower())
+    if user_id is not None:
+        taken = taken.filter(User.id != user_id)
+    if taken.first():
+        return "That username is taken."
+    return None
+
+
 def active_game_for(user_id):
     return (Game.query.filter(Game.status == "active",
                               or_(Game.white_id == user_id, Game.black_id == user_id))
             .order_by(Game.created_at.desc()).first())
+
+
+def use_cards(*entries):
+    now = utcnow()
+    for e in entries:
+        e.card.status = "used"
+        e.card.used_at = now
+        db.session.delete(e)
 
 
 def try_match(entry):
@@ -214,16 +283,42 @@ def try_match(entry):
         game = Game(white_id=a.user_id, black_id=b.user_id,
                     white_card_tier=a.card.tier, black_card_tier=b.card.tier,
                     white_elo_before=a.user.elo, black_elo_before=b.user.elo)
-        now = utcnow()
-        for e in (entry, other):
-            e.card.status = "used"
-            e.card.used_at = now
         db.session.add(game)
-        db.session.delete(entry)
-        db.session.delete(other)
+        use_cards(entry, other)
         db.session.flush()
         return game
     return None
+
+
+def get_bot(elo):
+    """Find (or create) the bot with exactly this rating."""
+    name = f"{BOT_PREFIX}{elo}"
+    bot_user = User.query.filter_by(username=name).first()
+    if not bot_user:
+        bot_user = User(username=name, password_hash="!", elo=elo, is_bot=True)
+        db.session.add(bot_user)
+        db.session.flush()
+    return bot_user
+
+
+def match_with_bot(entry):
+    """Pair a queued player with a bot whose rating fits their card."""
+    if "fixed" in TIERS[entry.card.tier]:
+        target = TIERS[entry.card.tier]["fixed"]
+    else:
+        target = random.randint(entry.min_elo, entry.max_elo)
+    bot_user = get_bot(max(100, target))
+    human, tier = entry.user, entry.card.tier
+    if random.random() < 0.5:
+        game = Game(white_id=human.id, black_id=bot_user.id, white_card_tier=tier, black_card_tier=0,
+                    white_elo_before=human.elo, black_elo_before=bot_user.elo)
+    else:
+        game = Game(white_id=bot_user.id, black_id=human.id, white_card_tier=0, black_card_tier=tier,
+                    white_elo_before=bot_user.elo, black_elo_before=human.elo)
+    db.session.add(game)
+    use_cards(entry)
+    db.session.flush()
+    return game
 
 
 def expected_score(rating, opponent):
@@ -235,28 +330,91 @@ def finish_game(game, result, termination):
         return
     white, black = game.white, game.black
     white_score = {"1-0": 1.0, "0-1": 0.0, "1/2-1/2": 0.5}[result]
-    exp_white = expected_score(white.elo, black.elo)
-    change = round(K_FACTOR * (white_score - exp_white))
+    change = round(K_FACTOR * (white_score - expected_score(white.elo, black.elo)))
 
-    white.elo += change
-    black.elo -= change
-    game.white_elo_change = change
-    game.black_elo_change = -change
-
-    if result == "1-0":
-        white.wins += 1
-        black.losses += 1
-    elif result == "0-1":
-        black.wins += 1
-        white.losses += 1
-    else:
-        white.draws += 1
-        black.draws += 1
+    # Bots have fixed ratings and no record; only the human's Elo moves.
+    for player, delta, score in ((white, change, white_score), (black, -change, 1 - white_score)):
+        if player.is_bot:
+            delta = 0
+        else:
+            player.elo += delta
+            if score == 1:
+                player.wins += 1
+            elif score == 0:
+                player.losses += 1
+            else:
+                player.draws += 1
+        if player is white:
+            game.white_elo_change = delta
+        else:
+            game.black_elo_change = delta
 
     game.status = "finished"
     game.result = result
     game.termination = termination
     game.draw_offered_by = None
+
+
+def apply_move(game, board, move):
+    board.push(move)
+    game.moves = (game.moves + " " + move.uci()).strip()
+    game.fen = board.fen()
+    game.draw_offered_by = None
+    outcome = board.outcome(claim_draw=True)
+    if outcome:
+        finish_game(game, outcome.result(), outcome.termination.name.replace("_", " ").title())
+
+
+# ---------------------------------------------------------------------------
+# Bot move scheduling
+# ---------------------------------------------------------------------------
+_bot_lock = threading.Lock()
+_bot_busy = set()
+
+
+def bot_to_move(game):
+    if game.status != "active":
+        return False
+    color = game.bot_color()
+    return color is not None and (game.board().turn == chess.WHITE) == (color == "white")
+
+
+def kick_bot(game):
+    """If it's the bot's turn, start it thinking (in the background)."""
+    if not bot_to_move(game):
+        return
+    with _bot_lock:
+        if game.id in _bot_busy:
+            return
+        _bot_busy.add(game.id)
+    if app.config["BOT_SYNC"]:
+        run_bot_move(game.id)
+        db.session.expire_all()
+    else:
+        threading.Thread(target=run_bot_move, args=(game.id,), daemon=True).start()
+
+
+def run_bot_move(game_id):
+    try:
+        with app.app_context():
+            game = db.session.get(Game, game_id)
+            if not bot_to_move(game):
+                return
+            started = time.time()
+            board = game.board()
+            seen = len(game.move_list())
+            bot_user = game.white if game.bot_color() == "white" else game.black
+            move = engine.choose_move(board, bot_user.elo)
+            if not app.config["BOT_SYNC"]:
+                time.sleep(max(0.0, 0.7 - (time.time() - started)))  # feel less instant
+            db.session.refresh(game)
+            if game.status != "active" or len(game.move_list()) != seen:
+                return  # game changed while thinking (e.g. the human resigned)
+            apply_move(game, board, move)
+            db.session.commit()
+    finally:
+        with _bot_lock:
+            _bot_busy.discard(game_id)
 
 
 def game_state(game, user):
@@ -274,9 +432,11 @@ def game_state(game, user):
         legal = [m.uci() for m in board.legal_moves]
 
     def player(u, tier, before, change):
+        card = TIERS.get(tier)
         return {"username": u.username, "elo": u.elo, "elo_before": before,
-                "elo_change": change, "card": TIERS[tier]["name"],
-                "card_color": TIERS[tier]["color"]}
+                "elo_change": change, "is_bot": u.is_bot,
+                "card": card["name"] if card else "Bot",
+                "card_color": card["color"] if card else "#8b93a3"}
 
     moves = game.move_list()
     return {
@@ -315,25 +475,27 @@ def load_game_for_player(game_id):
 def index():
     if current_user():
         return redirect(url_for("dashboard"))
-    return render_template("index.html", tiers=CARD_TIERS)
+    return render_template("index.html", tiers=CARD_TIERS, starting_elo=STARTING_ELO)
 
 
 @app.post("/register")
 def register():
     username = request.form.get("username", "").strip()
     password = request.form.get("password", "")
-    if not (3 <= len(username) <= 32) or not username.replace("_", "").isalnum():
-        flash("Username must be 3-32 letters, numbers or underscores.")
-        return redirect(url_for("index"))
-    if len(password) < 6:
-        flash("Password must be at least 6 characters.")
-        return redirect(url_for("index"))
-    if User.query.filter(db.func.lower(User.username) == username.lower()).first():
-        flash("That username is taken.")
+    error = username_error(username)
+    if not error and len(password) < 6:
+        error = "Password must be at least 6 characters."
+    if error:
+        flash(error)
         return redirect(url_for("index"))
     user = User(username=username, password_hash=generate_password_hash(password))
     db.session.add(user)
-    db.session.commit()
+    try:
+        db.session.commit()
+    except IntegrityError:  # someone grabbed the name at the same moment
+        db.session.rollback()
+        flash("That username is taken.")
+        return redirect(url_for("index"))
     session.clear()
     session["user_id"] = user.id
     return redirect(url_for("dashboard"))
@@ -344,7 +506,7 @@ def login():
     username = request.form.get("username", "").strip()
     password = request.form.get("password", "")
     user = User.query.filter(db.func.lower(User.username) == username.lower()).first()
-    if not user or not check_password_hash(user.password_hash, password):
+    if not user or user.is_bot or not check_password_hash(user.password_hash, password):
         flash("Invalid username or password.")
         return redirect(url_for("index"))
     session.clear()
@@ -358,16 +520,40 @@ def logout():
     return redirect(url_for("index"))
 
 
+@app.route("/settings", methods=["GET", "POST"])
+@login_required
+def settings():
+    user = current_user()
+    if request.method == "POST":
+        new_name = request.form.get("username", "").strip()
+        if new_name == user.username:
+            return redirect(url_for("settings"))
+        error = username_error(new_name, user_id=user.id)
+        if error:
+            flash(error)
+            return redirect(url_for("settings"))
+        user.username = new_name
+        try:
+            db.session.commit()
+        except IntegrityError:
+            db.session.rollback()
+            flash("That username is taken.")
+            return redirect(url_for("settings"))
+        flash(f"Your username is now {new_name}.", "ok")
+        return redirect(url_for("settings"))
+    return render_template("settings.html", user=user)
+
+
 @app.get("/dashboard")
 @login_required
 def dashboard():
     user = current_user()
-    leaders = User.query.order_by(User.elo.desc()).limit(10).all()
+    leaders = User.query.filter_by(is_bot=False).order_by(User.elo.desc()).limit(10).all()
     recent = (Game.query.filter(Game.status == "finished",
                                 or_(Game.white_id == user.id, Game.black_id == user.id))
               .order_by(Game.updated_at.desc()).limit(10).all())
     return render_template("dashboard.html", user=user, tiers=CARD_TIERS,
-                           leaders=leaders, recent=recent)
+                           leaders=leaders, recent=recent, bot_wait=BOT_WAIT_SECONDS)
 
 
 @app.get("/game/<int:game_id>")
@@ -397,6 +583,7 @@ def api_me():
         queue=({"card": entry.card.to_dict(entry.elo_at_queue),
                 "since": entry.created_at.isoformat() + "Z"} if entry else None),
         active_game=game.id if game else None,
+        bot_wait_seconds=BOT_WAIT_SECONDS,
     )
 
 
@@ -437,9 +624,9 @@ def api_queue_join():
     if not card:
         return jsonify(error="You don't have that card."), 400
 
-    t = TIERS[card.tier]
+    lo, hi = card_range(card.tier, user.elo)
     entry = QueueEntry(user_id=user.id, card_id=card.id, elo_at_queue=user.elo,
-                       min_elo=user.elo + t["min"], max_elo=user.elo + t["max"])
+                       min_elo=lo, max_elo=hi)
     card.status = "queued"
     db.session.add(entry)
     db.session.flush()
@@ -460,6 +647,19 @@ def api_queue_leave():
     return jsonify(ok=True)
 
 
+@app.post("/api/queue/bot")
+@login_required
+def api_queue_bot():
+    """Stop waiting for a human and play a bot rated for your card right away."""
+    user = current_user()
+    entry = QueueEntry.query.filter_by(user_id=user.id).first()
+    if not entry:
+        return jsonify(error="You aren't searching for a match."), 400
+    game = match_with_bot(entry)
+    db.session.commit()
+    return jsonify(queued=False, game_id=game.id)
+
+
 @app.get("/api/queue/status")
 @login_required
 def api_queue_status():
@@ -467,6 +667,8 @@ def api_queue_status():
     entry = QueueEntry.query.filter_by(user_id=user.id).first()
     if entry:
         game = try_match(entry)
+        if not game and utcnow() - entry.created_at >= timedelta(seconds=BOT_WAIT_SECONDS):
+            game = match_with_bot(entry)
         db.session.commit()
         if game:
             return jsonify(queued=False, game_id=game.id)
@@ -483,6 +685,7 @@ def api_queue_status():
 @login_required
 def api_game(game_id):
     user, game, _ = load_game_for_player(game_id)
+    kick_bot(game)  # resumes a bot that was interrupted (e.g. by a server restart)
     return jsonify(game_state(game, user))
 
 
@@ -504,15 +707,9 @@ def api_move(game_id):
     if move not in board.legal_moves:
         return jsonify(error="Illegal move."), 400
 
-    board.push(move)
-    game.moves = (game.moves + " " + uci).strip()
-    game.fen = board.fen()
-    game.draw_offered_by = None
-
-    outcome = board.outcome(claim_draw=True)
-    if outcome:
-        finish_game(game, outcome.result(), outcome.termination.name.replace("_", " ").title())
+    apply_move(game, board, move)
     db.session.commit()
+    kick_bot(game)
     return jsonify(game_state(game, user))
 
 
@@ -533,7 +730,13 @@ def api_draw(game_id):
     if game.status != "active":
         return jsonify(error="Game is over."), 400
     action = (request.get_json(silent=True) or {}).get("action")
-    if action == "offer":
+    bot_color = game.bot_color()
+    if action == "offer" and bot_color:
+        chess_color = chess.WHITE if bot_color == "white" else chess.BLACK
+        if not engine.wants_draw(game.board(), chess_color):
+            return jsonify(error="The bot declined your draw offer."), 400
+        finish_game(game, "1/2-1/2", "Draw Agreed")
+    elif action == "offer":
         game.draw_offered_by = color
     elif action == "accept" and game.draw_offered_by and game.draw_offered_by != color:
         finish_game(game, "1/2-1/2", "Draw Agreed")
@@ -547,6 +750,7 @@ def api_draw(game_id):
 
 with app.app_context():
     db.create_all()
+    migrate()
 
 if __name__ == "__main__":
     app.run(

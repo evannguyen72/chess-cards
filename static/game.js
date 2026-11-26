@@ -68,7 +68,7 @@ function playerHTML(p, color) {
   }
   const turn = state.status === "active" && state.turn === color ? '<span class="turn-dot"></span>' : "";
   return `${turn}<span class="piece-icon ${color[0]}">♚</span>
-    <strong>${p.username}</strong> <span class="muted">${p.elo_before}${change}</span>
+    <strong>${p.is_bot ? "🤖 " : ""}${p.username}</strong> <span class="muted">${p.elo_before}${change}</span>
     <span class="card-chip" style="--c:${p.card_color}">${p.card}</span>`;
 }
 
@@ -91,7 +91,9 @@ function render() {
   const active = state.status === "active";
   if (active) {
     const mine = state.turn === me;
-    $("status").textContent = (mine ? "Your move" : "Opponent's move") + (state.in_check ? " — check!" : "");
+    const oppIsBot = state[opp].is_bot;
+    const waiting = oppIsBot ? "Bot is thinking…" : "Opponent's move";
+    $("status").textContent = (mine ? "Your move" : waiting) + (state.in_check ? " — check!" : "");
     $("status").className = "status " + (mine ? "yours" : "");
   } else {
     $("status").textContent = "Game over";

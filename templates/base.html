@@ -13,13 +13,14 @@
       <nav>
         <span class="muted">{{ user.username }} · <strong id="nav-elo">{{ user.elo }}</strong></span>
         <a href="{{ url_for('dashboard') }}">Dashboard</a>
+        <a href="{{ url_for('settings') }}">Settings</a>
         <a href="{{ url_for('logout') }}">Log out</a>
       </nav>
     {% endif %}
   </header>
   <main>
-    {% with messages = get_flashed_messages() %}
-      {% for m in messages %}<div class="flash">{{ m }}</div>{% endfor %}
+    {% with messages = get_flashed_messages(with_categories=true) %}
+      {% for cat, m in messages %}<div class="flash {{ cat }}">{{ m }}</div>{% endfor %}
     {% endwith %}
     {% block content %}{% endblock %}
   </main>

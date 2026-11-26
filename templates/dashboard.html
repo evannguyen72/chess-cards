@@ -29,14 +29,17 @@
         <strong>Searching for an opponent…</strong>
         <div class="muted small" id="queue-info"></div>
       </div>
-      <button id="leave-queue" class="btn small">Cancel</button>
+      <div class="queue-buttons">
+        <button id="play-bot" class="btn small primary">Play a bot now</button>
+        <button id="leave-queue" class="btn small">Cancel</button>
+      </div>
     </div>
   </div>
 </section>
 
 <section>
   <h2>Your cards</h2>
-  <p class="muted small">Play a card to search for an opponent in its rating range. If you cancel the search, you keep the card. It's used up once a match is found.</p>
+  <p class="muted small">Play a card to search for an opponent in its rating range. If you cancel the search, you keep the card. It's used up once a match is found. If no player is found within {{ bot_wait }} seconds, a bot rated for your card plays you instead.</p>
   <div id="my-cards" class="card-row"></div>
   <p id="no-cards" class="muted hidden">You don't have any cards. Open your daily pack to get one.</p>
 </section>
@@ -49,8 +52,8 @@
       {% for t in tiers %}
       <tr>
         <td><span class="dot" style="background: {{ t.color }}"></span>{{ t.name }}</td>
-        <td>{{ '%+d'|format(t.min) }} / {{ '%+d'|format(t.max) }}</td>
-        <td>{{ user.elo + t.min }}–{{ user.elo + t.max }}</td>
+        <td>{{ t.label }}</td>
+        <td>{{ range_label(t.tier, user.elo) }}</td>
         <td>{{ t.weight }}%</td>
       </tr>
       {% endfor %}

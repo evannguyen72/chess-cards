@@ -12,15 +12,13 @@ async function api(url, options = {}) {
   return data;
 }
 
-function fmt(n) { return (n > 0 ? "+" : "") + n; }
-
 function cardHTML(c, withButton) {
   return `
     <div class="chess-card" style="--c:${c.color}">
       <div class="card-tier">Tier ${c.tier}</div>
       <div class="card-name">${c.name}</div>
-      <div class="card-range">${fmt(c.min)} to ${fmt(c.max)}</div>
-      <div class="card-elo">Opponent ${c.elo_min}–${c.elo_max}</div>
+      <div class="card-range">${c.label}</div>
+      <div class="card-elo">Opponent ${c.opponent}</div>
       <div class="card-rarity">${c.rarity}</div>
       ${withButton ? `<button class="btn small primary" data-card="${c.id}">Play this card</button>` : ""}
     </div>`;
@@ -55,7 +53,7 @@ async function refresh() {
   if (me.queue) {
     $("queue-panel").classList.remove("hidden");
     const c = me.queue.card;
-    $("queue-info").textContent = `${c.name} card · looking for ${c.elo_min}–${c.elo_max}`;
+    $("queue-info").textContent = `${c.name} card · looking for ${c.opponent}`;
     startPolling();
   } else {
     $("queue-panel").classList.add("hidden");
@@ -103,6 +101,13 @@ $("my-cards").addEventListener("click", async (e) => {
     if (r.game_id) { window.location = `/game/${r.game_id}`; return; }
     refresh();
   } catch (err) { alert(err.message); }
+});
+
+$("play-bot").addEventListener("click", async () => {
+  try {
+    const r = await api("/api/queue/bot", { method: "POST" });
+    window.location = `/game/${r.game_id}`;
+  } catch (e) { alert(e.message); refresh(); }
 });
 
 $("leave-queue").addEventListener("click", async () => {

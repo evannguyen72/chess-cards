@@ -2,7 +2,7 @@
 {% block content %}
 <section class="hero">
   <h1>Your card picks your opponent.</h1>
-  <p class="muted">Open one pack a day. Each card sets the rating range of the opponent you can face, from someone at your own level up to a Grandmaster card that matches you with someone 200 points above you.</p>
+  <p class="muted">Open one pack a day. Each card sets the rating range of the opponent you can face, from someone at your own level up to a Grandmaster card that matches you with a 2000-rated opponent. No one around? A bot rated for your card takes their place.</p>
 </section>
 
 <section class="auth-grid">
@@ -16,7 +16,7 @@
     <h2>Create account</h2>
     <label>Username <input name="username" required minlength="3" maxlength="32" autocomplete="username"></label>
     <label>Password <input name="password" type="password" required minlength="6" autocomplete="new-password"></label>
-    <button class="btn">Sign up — start at 1200</button>
+    <button class="btn">Sign up — start at {{ starting_elo }}</button>
   </form>
 </section>
 
@@ -27,7 +27,7 @@
       <div class="chess-card" style="--c: {{ t.color }}">
         <div class="card-tier">Tier {{ t.tier }}</div>
         <div class="card-name">{{ t.name }}</div>
-        <div class="card-range">{{ '%+d'|format(t.min) }} to {{ '%+d'|format(t.max) }}</div>
+        <div class="card-range">{{ t.label }}</div>
         <div class="card-rarity">{{ t.rarity }} · {{ t.weight }}%</div>
       </div>
     {% endfor %}

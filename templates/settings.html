@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+{% block title %}Settings · Chess Cards{% endblock %}
+{% block content %}
+<section class="panel narrow">
+  <h2>Change your username</h2>
+  <p class="muted small">3–32 letters, numbers or underscores. Every username must be different. Capitalization doesn't count, so "Evan" and "evan" can't both exist.</p>
+  <form method="post" action="{{ url_for('settings') }}">
+    <label>Username
+      <input name="username" value="{{ user.username }}" required minlength="3" maxlength="32"
+             pattern="[A-Za-z0-9_]+" autocomplete="username">
+    </label>
+    <button class="btn primary">Save</button>
+  </form>
+</section>
+{% endblock %}

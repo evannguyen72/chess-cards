@@ -1,6 +1,8 @@
 # Chess Cards
 
-Play chess against other people. Your opponent's rating is decided by the card you pull from your daily pack, from a Mirror Match (within 10 points of your Elo) up to a Grandmaster card (170 to 200 points above you).
+Play chess against other people. Your opponent's rating is decided by the card you pull from your daily pack, from a Mirror Match (within 10 points of your Elo) up to a Grandmaster card that matches you with a 2000-rated opponent. New players start at 700 Elo.
+
+If no player in your card's range is found within 15 seconds, or you click **Play a bot now**, a bot rated for your card plays you instead. Bots are built in (see `bot.py`). Higher-rated bots look further ahead and make fewer mistakes. Bot ratings never change, and bot games count toward your Elo.
 
 Built with Python (Flask), and all user data is stored in a SQL database (SQLite by default).
 

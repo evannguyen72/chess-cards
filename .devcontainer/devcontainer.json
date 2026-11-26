@@ -1,0 +1,20 @@
+{
+  "name": "Chess Cards",
+  "image": "mcr.microsoft.com/devcontainers/python:3.12",
+  "postCreateCommand": "pip install -r requirements.txt pytest",
+  "postAttachCommand": {
+    "server": "HOST=0.0.0.0 FLASK_DEBUG=0 python app.py"
+  },
+  "forwardPorts": [5000],
+  "portsAttributes": {
+    "5000": {
+      "label": "Chess Cards",
+      "onAutoForward": "openBrowser"
+    }
+  },
+  "customizations": {
+    "vscode": {
+      "extensions": ["ms-python.python"]
+    }
+  }
+}
